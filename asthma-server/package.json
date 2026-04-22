@@ -1,0 +1,23 @@
+{
+  "name": "asthma-server",
+  "version": "0.1.0",
+  "description": "천식환자 공간 조성 가이드 서비스 - 서버",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test 'tests/**/*.test.js'"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "aedes": "^0.51.3",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "mqtt": "^5.10.1",
+    "node-cron": "^3.0.3"
+  }
+}
