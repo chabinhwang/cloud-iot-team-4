@@ -31,23 +31,60 @@ npm start
 
 5초마다 Mock 센서가 데이터를 publish하고, 서버 Subscriber가 수신 → Store에 저장됩니다.
 
+### API 문서 (Swagger UI)
+
+서버 기동 시 OpenAPI 3.0 스펙과 Swagger UI가 함께 제공됩니다. 브라우저에서 각 엔드포인트의 스키마 확인 + "Try it out"으로 실행까지 가능.
+
+- `http://localhost:3000/docs` — Swagger UI (`open http://localhost:3000/docs`)
+- `http://localhost:3000/openapi.json` — 원본 OpenAPI JSON (Postman import · SDK 생성용)
+
+태그: `Health` / `Data` / `Guide` / `Auth`. 문서는 `src/routes/*.js`·`src/app.js`의 `@openapi` JSDoc 주석에서 런타임 생성되며, 스펙 빌더와 재사용 스키마는 `src/docs/openapi.js`에 있습니다. 라우트 변경 시 주석도 함께 업데이트하세요.
+
 ### 동작 확인 (REST)
+
+기본 `.env.example` 그대로(Fitbit·Weather·Discord·Sensor 전부 Mock, webhook/API 키 없음) 상태에서 바로 쓸 수 있는 명령들입니다. 출력은 `jq`로 정리하면 편합니다.
 
 ```bash
 # 1) 헬스체크
-curl http://localhost:3000/health
+curl -s http://localhost:3000/health | jq
 
-# 2) Mock publisher가 보내고 있는 최신 실내 환경
-curl http://localhost:3000/api/data/environment
+# 2) Mock 센서가 5초마다 publish한 실내 환경 (MQTT → Store)
+curl -s http://localhost:3000/api/data/environment | jq
+curl -s http://localhost:3000/api/data/environments | jq
 
-# 3) 가이드 즉시 실행 — Discord 미발송 프리뷰
-curl -X POST http://localhost:3000/api/guide/trigger \
+# 3) 5초마다 타임스탬프/값이 바뀌는지 라이브로 보기
+watch -n 2 'curl -s http://localhost:3000/api/data/environment | jq ".timestamp,.co2,.pm25"'
+
+# 4) 가이드 프리뷰 — Discord 미발송, Mock Fitbit 시나리오별
+curl -s "http://localhost:3000/api/guide/preview?scenario=healthy" | jq
+curl -s "http://localhost:3000/api/guide/preview?scenario=mild"    | jq
+curl -s "http://localhost:3000/api/guide/preview?scenario=severe"  | jq
+curl -s "http://localhost:3000/api/guide/preview?scenario=random"  | jq
+
+# 5) 가이드 트리거
+#    sendToDiscord=false → REST 응답만
+#    sendToDiscord=true  → Mock Discord라 서버 콘솔에 Embed JSON까지 출력
+curl -s -X POST http://localhost:3000/api/guide/trigger \
   -H 'content-type: application/json' \
-  -d '{"scenario":"severe","sendToDiscord":false}'
+  -d '{"scenario":"severe","sendToDiscord":false}' | jq
 
-# 4) Mock Fitbit 시나리오 선택 (healthy | mild | severe | random)
-curl "http://localhost:3000/api/guide/preview?scenario=mild"
+curl -s -X POST http://localhost:3000/api/guide/trigger \
+  -H 'content-type: application/json' \
+  -d '{"scenario":"severe","sendToDiscord":true}' | jq
+
+# 6) 리포트에서 필드만 골라보기
+curl -s "http://localhost:3000/api/guide/preview?scenario=severe" | jq '.report.status_summary'
+curl -s "http://localhost:3000/api/guide/preview?scenario=severe" | jq '.report.environment_action'
+curl -s "http://localhost:3000/api/guide/preview?scenario=severe" | jq '.report.health_analysis | {weight, level, reasons}'
+
+# 7) 시나리오별 overall 상태 한 줄 비교
+for s in healthy mild severe; do
+  echo -n "$s → "
+  curl -s "http://localhost:3000/api/guide/preview?scenario=$s" | jq -r '.report.status_summary.overall'
+done
 ```
+
+> 기본 Mock 상태에서는 `/auth/fitbit/*`(실제 `FITBIT_CLIENT_ID` 필요), `/api/data/biometric*`(Fitbit MQTT publisher 없음 → Store 비어있음)는 의미 없는 응답이 나옵니다. Mock Fitbit 데이터는 `/api/guide/*` 호출 시점에만 즉석 생성돼 리포트에 포함됩니다.
 
 3번 응답 예시 (severe 시나리오 + 나쁜 실내 환경):
 ```json
