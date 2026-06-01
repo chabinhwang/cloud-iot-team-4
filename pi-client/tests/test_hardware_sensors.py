@@ -109,7 +109,7 @@ class RandomSubstituteSensorTests(unittest.TestCase):
         from src.sensors.environment import create_hardware_sensor_suite
         from src.sensors.random_substitutes import RandomSGP30AirQualitySensor, RandomZPH01DustSensor
 
-        config = PiClientConfig.from_env({"AWS_IOT_ENDPOINT": "endpoint"})
+        config = PiClientConfig.from_env({"API_BASE_URL": "https://example.execute-api.ap-northeast-2.amazonaws.com"})
         suite = create_hardware_sensor_suite(config)
 
         self.assertTrue(any(isinstance(sensor, RandomZPH01DustSensor) for sensor in suite.sensors))

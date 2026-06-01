@@ -1,4 +1,4 @@
-"""Command-line entry point for the Raspberry Pi AWS IoT publisher."""
+"""Command-line entry point for the Raspberry Pi API Gateway poster."""
 
 from __future__ import annotations
 

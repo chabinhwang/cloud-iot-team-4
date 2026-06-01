@@ -1,4 +1,4 @@
-"""AWS IoT Core MQTT publisher for Raspberry Pi environment readings."""
+"""API Gateway HTTP poster for Raspberry Pi environment readings."""
 
 from __future__ import annotations
 
@@ -7,12 +7,19 @@ import logging
 import threading
 from datetime import datetime, timezone
 from typing import Callable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from .config import PiClientConfig
 from .sensors.mock import read_environment
 
 LOGGER = logging.getLogger(__name__)
 SensorReader = Callable[[], Mapping[str, float | int | None]]
+UrlOpener = Callable[[Request, float], object]
+
+
+class MeasurementPostError(RuntimeError):
+    """Raised when API Gateway rejects or cannot receive a measurement."""
 
 
 def _to_utc_timestamp(now: datetime | None = None) -> str:
@@ -29,7 +36,7 @@ def build_payload(
     *,
     now: datetime | None = None,
 ) -> dict[str, str | float | int]:
-    """Build the JSON payload consumed by the AWS Lambda/DynamoDB pipeline."""
+    """Build the JSON payload consumed by the API Gateway/Lambda pipeline."""
 
     payload: dict[str, str | float | int] = {
         "device_id": device_id,
@@ -41,80 +48,48 @@ def build_payload(
     return payload
 
 
-def _mqtt_qos(qos: int):
-    from awscrt import mqtt
+def post_measurement(
+    config: PiClientConfig,
+    payload: Mapping[str, str | float | int],
+    *,
+    opener: UrlOpener = urlopen,
+) -> str:
+    """POST one measurement payload to API Gateway and return response text."""
 
-    return mqtt.QoS.AT_LEAST_ONCE if qos == 1 else mqtt.QoS.AT_MOST_ONCE
-
-
-def create_mqtt_connection(config: PiClientConfig):
-    """Create an mTLS MQTT311 connection using AWS IoT Device SDK for Python v2."""
-
-    from awsiot import mqtt_connection_builder
-
-    def on_connection_interrupted(connection, error, **kwargs):
-        LOGGER.warning("AWS IoT connection interrupted: %s", error)
-
-    def on_connection_resumed(connection, return_code, session_present, **kwargs):
-        LOGGER.info(
-            "AWS IoT connection resumed: return_code=%s session_present=%s",
-            return_code,
-            session_present,
-        )
-
-    def on_connection_success(connection, callback_data):
-        LOGGER.info("AWS IoT connected: session_present=%s", callback_data.session_present)
-
-    def on_connection_failure(connection, callback_data):
-        LOGGER.error("AWS IoT connection failed: %s", callback_data.error)
-
-    def on_connection_closed(connection, callback_data):
-        LOGGER.info("AWS IoT connection closed")
-
-    return mqtt_connection_builder.mtls_from_path(
-        endpoint=config.endpoint,
-        cert_filepath=str(config.cert),
-        pri_key_filepath=str(config.private_key),
-        ca_filepath=str(config.root_ca),
-        client_id=config.client_id,
-        clean_session=False,
-        keep_alive_secs=30,
-        on_connection_interrupted=on_connection_interrupted,
-        on_connection_resumed=on_connection_resumed,
-        on_connection_success=on_connection_success,
-        on_connection_failure=on_connection_failure,
-        on_connection_closed=on_connection_closed,
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request = Request(
+        config.measurements_url,
+        data=encoded,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
 
-
-def connect(connection, timeout_sec: float) -> None:
-    LOGGER.info("Connecting to AWS IoT Core...")
-    connection.connect().result(timeout_sec)
-
-
-def disconnect(connection, timeout_sec: float) -> None:
     try:
-        connection.disconnect().result(timeout_sec)
-    except Exception:  # noqa: BLE001 - best-effort shutdown path
-        LOGGER.exception("Failed to disconnect cleanly")
+        with opener(request, timeout=config.http_timeout_sec) as response:
+            body = response.read().decode("utf-8")
+            status = getattr(response, "status", None)
+    except HTTPError as exc:
+        raise MeasurementPostError(f"API Gateway POST failed with HTTP {exc.code}: {exc.reason}") from exc
+    except URLError as exc:
+        raise MeasurementPostError(f"API Gateway POST failed: {exc.reason}") from exc
+
+    if status is not None and not (200 <= int(status) < 300):
+        raise MeasurementPostError(f"API Gateway POST failed with HTTP {status}: {body}")
+
+    return body
 
 
 def publish_once(
-    connection,
     config: PiClientConfig,
     sensor_values: Mapping[str, float | int | None],
 ) -> dict[str, str | float | int]:
-    """Publish one environment reading and wait for the PUBACK when QoS=1."""
+    """Build and POST one environment reading."""
 
     payload = build_payload(config.device_id, sensor_values)
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    publish_future, _ = connection.publish(
-        topic=config.topic,
-        payload=encoded,
-        qos=_mqtt_qos(config.publish_qos),
-    )
-    publish_future.result(config.operation_timeout_sec)
-    LOGGER.info("Published %s", encoded)
+    response_body = post_measurement(config, payload)
+    LOGGER.info("Posted %s", json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    if response_body:
+        LOGGER.info("API response %s", response_body)
     return payload
 
 
@@ -124,18 +99,14 @@ def run_publisher(
     sensor_reader: SensorReader = read_environment,
     stop_event: threading.Event | None = None,
 ) -> None:
-    """Run the continuous sensor-read → MQTT-publish loop."""
+    """Run the continuous sensor-read → API Gateway POST loop."""
 
     shutdown = stop_event or threading.Event()
-    connection = create_mqtt_connection(config)
-    connect(connection, config.operation_timeout_sec)
+    LOGGER.info("Posting measurements to %s", config.measurements_url)
 
-    try:
-        while not shutdown.is_set():
-            try:
-                publish_once(connection, config, sensor_reader())
-            except Exception:  # noqa: BLE001 - keep daemon alive; SDK reconnects automatically
-                LOGGER.exception("Publish cycle failed; will retry after interval")
-            shutdown.wait(config.sample_interval_sec)
-    finally:
-        disconnect(connection, config.operation_timeout_sec)
+    while not shutdown.is_set():
+        try:
+            publish_once(config, sensor_reader())
+        except Exception:  # noqa: BLE001 - keep daemon alive across transient network/sensor failures
+            LOGGER.exception("Post cycle failed; will retry after interval")
+        shutdown.wait(config.sample_interval_sec)

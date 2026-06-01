@@ -1,1 +1,1 @@
-"""Raspberry Pi AWS IoT publisher package."""
+"""Raspberry Pi API Gateway measurement poster package."""

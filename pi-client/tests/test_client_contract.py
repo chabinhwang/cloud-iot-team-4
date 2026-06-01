@@ -1,40 +1,36 @@
-import os
 import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
 class PiClientContractTests(unittest.TestCase):
-    def test_config_builds_aws_iot_topic_from_device_id(self):
+    def test_config_builds_api_gateway_measurement_url(self):
         from src.config import PiClientConfig
 
         config = PiClientConfig.from_env(
             {
-                "AWS_IOT_ENDPOINT": "example-ats.iot.ap-northeast-2.amazonaws.com",
+                "API_BASE_URL": "https://example.execute-api.ap-northeast-2.amazonaws.com/",
                 "DEVICE_ID": "rpi_001",
-                "AWS_IOT_ROOT_CA": "certs/AmazonRootCA1.pem",
-                "AWS_IOT_CERT": "certs/rpi_001.pem.crt",
-                "AWS_IOT_PRIVATE_KEY": "certs/rpi_001.private.key",
                 "SAMPLE_INTERVAL_SEC": "15",
-                "PUBLISH_QOS": "1",
+                "HTTP_TIMEOUT_SEC": "8",
                 "MOCK_SENSOR": "false",
-                "ZPH01_SERIAL_PORT": "/dev/serial0",
                 "DHT11_PIN": "D4",
-                "SGP30_I2C_FREQUENCY": "100000",
             }
         )
 
-        self.assertEqual(config.topic, "health/sensor/rpi_001/environment")
+        self.assertEqual(
+            config.measurements_url,
+            "https://example.execute-api.ap-northeast-2.amazonaws.com/measurements/environment",
+        )
         self.assertEqual(config.sample_interval_sec, 15)
-        self.assertEqual(config.publish_qos, 1)
+        self.assertEqual(config.http_timeout_sec, 8)
         self.assertFalse(config.use_mock_sensor)
-        self.assertEqual(config.zph01_serial_port, "/dev/serial0")
         self.assertEqual(config.dht11_pin, "D4")
-        self.assertEqual(config.sgp30_i2c_frequency, 100000)
 
     def test_build_payload_matches_server_contract_and_omits_missing_values(self):
         from src.publisher import build_payload
@@ -78,24 +74,72 @@ class PiClientContractTests(unittest.TestCase):
         self.assertGreaterEqual(values["humidity"], 0)
         self.assertLessEqual(values["humidity"], 100)
 
-    def test_config_validation_reports_missing_certificate_files(self):
+    def test_config_validation_requires_api_base_url_only(self):
         from src.config import PiClientConfig, validate_config
+
+        config = PiClientConfig.from_env({})
+
+        with self.assertRaises(ValueError) as ctx:
+            validate_config(config)
+
+        self.assertIn("API_BASE_URL", str(ctx.exception))
+
+    def test_post_measurement_sends_json_to_api_gateway(self):
+        from src.config import PiClientConfig
+        from src.publisher import post_measurement
+
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok":true}'
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = request.data.decode("utf-8")
+            captured["timeout"] = timeout
+            return FakeResponse()
 
         config = PiClientConfig.from_env(
             {
-                "AWS_IOT_ENDPOINT": "example-ats.iot.ap-northeast-2.amazonaws.com",
-                "AWS_IOT_ROOT_CA": "/tmp/missing-root-ca.pem",
-                "AWS_IOT_CERT": "/tmp/missing-cert.pem.crt",
-                "AWS_IOT_PRIVATE_KEY": "/tmp/missing-private.pem.key",
+                "API_BASE_URL": "https://example.execute-api.ap-northeast-2.amazonaws.com",
+                "HTTP_TIMEOUT_SEC": "3",
             }
         )
+        response_body = post_measurement(
+            config,
+            {"device_id": "rpi_001", "pm25": 12.3},
+            opener=fake_urlopen,
+        )
 
-        with self.assertRaises(FileNotFoundError) as ctx:
-            validate_config(config)
+        self.assertEqual(captured["url"], "https://example.execute-api.ap-northeast-2.amazonaws.com/measurements/environment")
+        self.assertEqual(captured["headers"]["Content-type"], "application/json")
+        self.assertEqual(captured["body"], '{"device_id":"rpi_001","pm25":12.3}')
+        self.assertEqual(captured["timeout"], 3)
+        self.assertEqual(response_body, '{"ok":true}')
 
-        self.assertIn("AWS_IOT_ROOT_CA", str(ctx.exception))
-        self.assertIn("AWS_IOT_CERT", str(ctx.exception))
-        self.assertIn("AWS_IOT_PRIVATE_KEY", str(ctx.exception))
+    def test_post_measurement_raises_readable_error_on_http_failure(self):
+        from src.config import PiClientConfig
+        from src.publisher import MeasurementPostError, post_measurement
+
+        def fake_urlopen(request, timeout):
+            raise HTTPError(request.full_url, 500, "Internal Server Error", hdrs=None, fp=None)
+
+        config = PiClientConfig.from_env({"API_BASE_URL": "https://example.execute-api.ap-northeast-2.amazonaws.com"})
+
+        with self.assertRaises(MeasurementPostError) as ctx:
+            post_measurement(config, {"device_id": "rpi_001"}, opener=fake_urlopen)
+
+        self.assertIn("500", str(ctx.exception))
 
 
 if __name__ == "__main__":

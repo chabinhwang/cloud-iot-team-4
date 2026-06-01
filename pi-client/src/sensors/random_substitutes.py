@@ -1,7 +1,7 @@
 """Random substitute sensors for hardware that is currently unavailable.
 
 Used when ZPH01 and SGP30 modules cannot be connected, while keeping the same
-server payload contract for the AWS IoT demo.
+server payload contract for the API Gateway demo.
 """
 
 from __future__ import annotations
