@@ -46,8 +46,11 @@ printf '[smoke] TABLE_NAME=%s REGION=%s\n' "$TABLE_NAME" "$REGION"
 request GET /health
 request POST /measurements/environment "{\"device_id\":\"$DEVICE_ID\",\"timestamp\":\"$TS\",\"pm25\":32.4,\"pm10\":55.1,\"co2\":1250,\"voc\":0.58,\"temperature\":25.2,\"humidity\":64}"
 request POST /biometrics/fitbit "{\"user_id\":\"$USER_ID\",\"date\":\"$DATE\",\"sleep_minutes\":320,\"avg_spo2\":92,\"respiratory_rate\":23,\"resting_hr\":82,\"hrv\":18}"
+request POST /google-health/fitbit/sync "{\"user_id\":\"$USER_ID\",\"date\":\"$DATE\"}"
+request POST /biometrics/fitbit/notify "{\"user_id\":\"$USER_ID\",\"date\":\"$DATE\",\"sleep_minutes\":330,\"avg_spo2\":94,\"respiratory_rate\":20,\"resting_hr\":78,\"hrv\":24}"
 request POST /guides/generate "{\"user_id\":\"$USER_ID\",\"device_id\":\"$DEVICE_ID\",\"date\":\"$DATE\"}"
 request GET "/guides/today?userId=$USER_ID&date=$DATE"
+request POST /guides/notify "{\"date\":\"$DATE\"}"
 
 IOT_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 IOT_PAYLOAD="{\"device_id\":\"$DEVICE_ID\",\"timestamp\":\"$IOT_TS\",\"pm25\":28,\"co2\":1180,\"temperature\":24.8,\"humidity\":61}"

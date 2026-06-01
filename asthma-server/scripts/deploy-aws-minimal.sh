@@ -21,6 +21,13 @@ LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}"
 LAMBDA_RUNTIME="${LAMBDA_RUNTIME:-nodejs20.x}"
 DEFAULT_USER_ID="${DEFAULT_USER_ID:-user_001}"
 DEFAULT_DEVICE_ID="${DEFAULT_DEVICE_ID:-rpi_001}"
+FITBIT_CLIENT_ID="${FITBIT_CLIENT_ID:-}"
+FITBIT_CLIENT_SECRET="${FITBIT_CLIENT_SECRET:-}"
+FITBIT_SCOPES="${FITBIT_SCOPES:-sleep heartrate oxygen_saturation respiratory_rate profile}"
+FITBIT_STATE_SECRET="${FITBIT_STATE_SECRET:-}"
+FITBIT_REDIRECT_URI="${FITBIT_REDIRECT_URI:-}"
+USE_MOCK_DISCORD="${USE_MOCK_DISCORD:-true}"
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
 TABLE_ARN="arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/$TABLE_NAME"
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
@@ -52,6 +59,42 @@ add_lambda_permission() {
 }
 
 exists_text() { [[ -n "${1:-}" && "${1:-}" != "None" ]]; }
+
+write_lambda_env() {
+  local output="$1"
+  local redirect_uri="$2"
+  TABLE_NAME="$TABLE_NAME" \
+  DEFAULT_USER_ID="$DEFAULT_USER_ID" \
+  DEFAULT_DEVICE_ID="$DEFAULT_DEVICE_ID" \
+  FITBIT_CLIENT_ID="$FITBIT_CLIENT_ID" \
+  FITBIT_CLIENT_SECRET="$FITBIT_CLIENT_SECRET" \
+  FITBIT_REDIRECT_URI="$redirect_uri" \
+  FITBIT_SCOPES="$FITBIT_SCOPES" \
+  FITBIT_STATE_SECRET="$FITBIT_STATE_SECRET" \
+  USE_MOCK_DISCORD="$USE_MOCK_DISCORD" \
+  DISCORD_WEBHOOK_URL="$DISCORD_WEBHOOK_URL" \
+  LAMBDA_ENV_FILE="$output" \
+    python3 - <<'PY'
+import json
+import os
+
+keys = [
+    "TABLE_NAME",
+    "DEFAULT_USER_ID",
+    "DEFAULT_DEVICE_ID",
+    "FITBIT_CLIENT_ID",
+    "FITBIT_CLIENT_SECRET",
+    "FITBIT_REDIRECT_URI",
+    "FITBIT_SCOPES",
+    "FITBIT_STATE_SECRET",
+    "USE_MOCK_DISCORD",
+    "DISCORD_WEBHOOK_URL",
+]
+
+with open(os.environ["LAMBDA_ENV_FILE"], "w", encoding="utf-8") as fp:
+    json.dump({"Variables": {key: os.environ.get(key, "") for key in keys}}, fp)
+PY
+}
 
 log "Using AWS account=$ACCOUNT_ID region=$REGION"
 
@@ -130,6 +173,9 @@ cp "$APP_DIR/lambda/index.mjs" "$BUILD_DIR/index.mjs"
   zip -q -r "$ZIP_FILE" .
 )
 
+LAMBDA_ENV_FILE="$APP_DIR/.aws-build/lambda-env.json"
+write_lambda_env "$LAMBDA_ENV_FILE" "$FITBIT_REDIRECT_URI"
+
 log "Ensuring Lambda function $FUNCTION_NAME"
 if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" >/dev/null 2>&1; then
   aws lambda update-function-code \
@@ -144,7 +190,7 @@ if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" >
     --role "$ROLE_ARN" \
     --timeout 10 \
     --memory-size 128 \
-    --environment "Variables={TABLE_NAME=$TABLE_NAME,DEFAULT_USER_ID=$DEFAULT_USER_ID,DEFAULT_DEVICE_ID=$DEFAULT_DEVICE_ID}" \
+    --environment "file://$LAMBDA_ENV_FILE" \
     --region "$REGION" >/dev/null
   aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
 else
@@ -159,7 +205,7 @@ else
     --role "$ROLE_ARN" \
     --timeout 10 \
     --memory-size 128 \
-    --environment "Variables={TABLE_NAME=$TABLE_NAME,DEFAULT_USER_ID=$DEFAULT_USER_ID,DEFAULT_DEVICE_ID=$DEFAULT_DEVICE_ID}" \
+    --environment "file://$LAMBDA_ENV_FILE" \
     --tags project=cloud-iot-team-4,purpose=class-demo \
     --region "$REGION" >/dev/null
   aws lambda wait function-active --function-name "$FUNCTION_NAME" --region "$REGION"
@@ -198,9 +244,15 @@ fi
 
 for ROUTE_KEY in \
   'GET /health' \
+  'GET /auth/fitbit/login' \
+  'GET /auth/fitbit/callback' \
   'POST /measurements/environment' \
   'POST /biometrics/fitbit' \
+  'POST /biometrics/fitbit/notify' \
+  'POST /google-health/fitbit/sync' \
+  'POST /fitbit/sync' \
   'POST /guides/generate' \
+  'POST /guides/notify' \
   'GET /guides/today'
 do
   ROUTE_ID="$(aws apigatewayv2 get-routes --api-id "$API_ID" --region "$REGION" --query "Items[?RouteKey=='$ROUTE_KEY'].RouteId | [0]" --output text)"
@@ -218,6 +270,15 @@ do
       --region "$REGION" >/dev/null
   fi
 done
+
+EFFECTIVE_FITBIT_REDIRECT_URI="${FITBIT_REDIRECT_URI:-$API_ENDPOINT/auth/fitbit/callback}"
+write_lambda_env "$LAMBDA_ENV_FILE" "$EFFECTIVE_FITBIT_REDIRECT_URI"
+log "Updating Lambda environment with Fitbit callback $EFFECTIVE_FITBIT_REDIRECT_URI"
+aws lambda update-function-configuration \
+  --function-name "$FUNCTION_NAME" \
+  --environment "file://$LAMBDA_ENV_FILE" \
+  --region "$REGION" >/dev/null
+aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
 
 STAGE_NAME='$default'
 STAGE_EXISTS="$(aws apigatewayv2 get-stages --api-id "$API_ID" --region "$REGION" --query "Items[?StageName=='$STAGE_NAME'].StageName | [0]" --output text)"
@@ -280,6 +341,7 @@ ROLE_NAME=$ROLE_NAME
 API_NAME=$API_NAME
 API_ID=$API_ID
 API_ENDPOINT=$API_ENDPOINT
+FITBIT_REDIRECT_URI=$EFFECTIVE_FITBIT_REDIRECT_URI
 IOT_RULE_NAME=$IOT_RULE_NAME
 IOT_ENDPOINT=$IOT_ENDPOINT
 LOG_GROUP=$LOG_GROUP
@@ -290,6 +352,7 @@ cat <<SUMMARY
 Deployment complete.
 State file: $STATE_FILE
 API endpoint: $API_ENDPOINT
+Fitbit callback URL: $EFFECTIVE_FITBIT_REDIRECT_URI
 IoT data endpoint: $IOT_ENDPOINT
 DynamoDB table: $TABLE_NAME
 Lambda function: $FUNCTION_NAME

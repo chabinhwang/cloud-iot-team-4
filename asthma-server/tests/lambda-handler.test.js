@@ -6,6 +6,7 @@ function makeMemoryDb() {
   const envs = new Map();
   const bios = new Map();
   const guides = new Map();
+  const fitbitTokens = new Map();
   return {
     tableName: 'TestTable',
     async saveEnvironment(data) {
@@ -28,6 +29,19 @@ function makeMemoryDb() {
       };
       bios.set(item.PK, item);
       return item;
+    },
+    async saveFitbitToken(token) {
+      const item = {
+        PK: `USER#${token.user_id || 'user_001'}`,
+        SK: 'FITBIT_TOKEN',
+        type: 'fitbit_token',
+        data: { ...token, user_id: token.user_id || 'user_001' },
+      };
+      fitbitTokens.set(item.PK, item);
+      return item;
+    },
+    async getFitbitToken(userId = 'user_001') {
+      return fitbitTokens.get(`USER#${userId}`) ?? null;
     },
     async getLatestEnvironment(deviceId) {
       return envs.get(`DEVICE#${deviceId}`) ?? null;
@@ -105,6 +119,104 @@ test('Lambda HTTP flow stores environment, biometric, guide, and retrieves today
   );
   assert.equal(todayRes.statusCode, 200);
   assert.equal(JSON.parse(todayRes.body).item.SK, 'GUIDE#2026-06-01');
+});
+
+test('notify route generates guide and returns mock Discord delivery for single-user demo', async () => {
+  const handler = createHandler({ db: makeMemoryDb() });
+
+  await handler(
+    httpEvent('POST', '/measurements/environment', {
+      device_id: 'rpi_001',
+      timestamp: '2026-06-01T00:00:00Z',
+      pm25: 32.4,
+      pm10: 55.1,
+      co2: 1250,
+      voc: 0.58,
+      temperature: 25.2,
+      humidity: 64,
+    }),
+  );
+  await handler(
+    httpEvent('POST', '/biometrics/fitbit', {
+      user_id: 'user_001',
+      date: '2026-06-01',
+      source: 'fitbit_api',
+      sleep_minutes: 320,
+      sleep_efficiency: 89,
+      avg_spo2: 92,
+      min_spo2: 90,
+      max_spo2: 96,
+      respiratory_rate: 23,
+      resting_hr: 82,
+      hrv: 18,
+    }),
+  );
+
+  const notifyRes = await handler(httpEvent('POST', '/guides/notify', { date: '2026-06-01' }));
+
+  assert.equal(notifyRes.statusCode, 201);
+  const notifyBody = JSON.parse(notifyRes.body);
+  assert.equal(notifyBody.ok, true);
+  assert.equal(notifyBody.userId, 'user_001');
+  assert.equal(notifyBody.deviceId, 'rpi_001');
+  assert.equal(notifyBody.delivery.ok, true);
+  assert.equal(notifyBody.delivery.mock, true);
+  assert.equal(notifyBody.delivery.reason, 'USE_MOCK_DISCORD=true');
+  assert.equal(notifyBody.item.SK, 'GUIDE#2026-06-01');
+  assert.match(notifyBody.delivery.payload.content, /천식|실내|공기|환기/);
+});
+
+test('manual Fitbit notify route stores biometric, combines latest RPi data, and returns Discord delivery', async () => {
+  const handler = createHandler({ db: makeMemoryDb() });
+
+  await handler(
+    httpEvent('POST', '/measurements/environment', {
+      device_id: 'rpi_001',
+      timestamp: '2026-06-01T00:00:00Z',
+      pm25: 18,
+      pm10: 44,
+      co2: 920,
+      voc: 0.22,
+      temperature: 23.5,
+      humidity: 45,
+    }),
+  );
+
+  const res = await handler(
+    httpEvent('POST', '/biometrics/fitbit/notify', {
+      user_id: 'user_001',
+      date: '2026-06-01',
+      sleep_minutes: 330,
+      avg_spo2: 94,
+      respiratory_rate: 20,
+      resting_hr: 78,
+      hrv: 24,
+    }),
+  );
+
+  assert.equal(res.statusCode, 201);
+  const body = JSON.parse(res.body);
+  assert.equal(body.ok, true);
+  assert.equal(body.mode, 'manual-fitbit-notify');
+  assert.equal(body.biometric.SK, 'BIO#2026-06-01');
+  assert.equal(body.item.SK, 'GUIDE#2026-06-01');
+  assert.equal(body.delivery.ok, true);
+  assert.equal(body.delivery.mock, true);
+  assert.equal(body.report.userId, 'user_001');
+});
+
+test('Google Health planned route documents future Fitbit sync path without external integration', async () => {
+  const handler = createHandler({ db: makeMemoryDb() });
+
+  const res = await handler(httpEvent('POST', '/google-health/fitbit/sync', { user_id: 'user_001', date: '2026-06-01' }));
+
+  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
+  assert.equal(body.ok, true);
+  assert.equal(body.provider, 'google-health-api');
+  assert.equal(body.mode, 'planned-only');
+  assert.equal(body.manualFallback, 'POST /biometrics/fitbit/notify');
+  assert.ok(body.plannedFlow.includes('Google OAuth consent for health data scopes'));
 });
 
 test('Lambda IoT rule event stores environment without HTTP wrapper', async () => {

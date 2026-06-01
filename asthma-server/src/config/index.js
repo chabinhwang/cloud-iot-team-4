@@ -50,7 +50,9 @@ export const config = {
     authorizeUrl: 'https://www.fitbit.com/oauth2/authorize',
     tokenUrl: 'https://api.fitbit.com/oauth2/token',
     apiBase: 'https://api.fitbit.com',
-    scopes: ['sleep', 'heartrate', 'oxygen_saturation', 'respiratory_rate'],
+    scopes: (process.env.FITBIT_SCOPES || 'sleep heartrate oxygen_saturation respiratory_rate profile')
+      .split(/[\s,]+/)
+      .filter(Boolean),
   },
 
   weather: {

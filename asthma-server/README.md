@@ -119,6 +119,51 @@ npm test
 
 ---
 
+## AWS Lambda 단일 사용자 데모
+
+과제 데모용 Lambda는 `DEFAULT_USER_ID=user_001`, `DEFAULT_DEVICE_ID=rpi_001` 기본값으로 동작합니다.
+
+- Raspberry Pi 데이터: `POST /measurements/environment`로 저장
+- Google Health/Fitbit 자동 연동 예정 경로: `POST /google-health/fitbit/sync`
+- 수동 Fitbit 입력 + 최신 RPi 데이터 결합 + Discord 전송: `POST /biometrics/fitbit/notify`
+
+현재 신규 Fitbit Developer App 등록은 Google Health API로 이전되었으므로, 실제 자동 연동은 하지 않고 Google Health 예정 경로만 둡니다. 과제 시연은 Fitbit 앱에서 확인한 값을 수동 API로 넣는 방식입니다.
+
+```bash
+cd asthma-server
+USE_MOCK_DISCORD=false \
+DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
+./scripts/deploy-aws-minimal.sh
+```
+
+Google Health 예정 경로 확인:
+
+```bash
+curl -X POST "$API_ENDPOINT/google-health/fitbit/sync" \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"user_001","date":"2026-06-01"}'
+```
+
+Fitbit 수동 입력 후 최신 Raspberry Pi 환경 데이터와 합쳐 Discord로 전송:
+
+```bash
+curl -X POST "$API_ENDPOINT/biometrics/fitbit/notify" \
+  -H 'content-type: application/json' \
+  -d '{
+    "user_id":"user_001",
+    "date":"2026-06-01",
+    "sleep_minutes":320,
+    "avg_spo2":96,
+    "respiratory_rate":18,
+    "resting_hr":72,
+    "hrv":35
+  }'
+```
+
+`USE_MOCK_DISCORD=true`이거나 `DISCORD_WEBHOOK_URL`이 비어 있으면 실제 전송 대신 Discord payload만 응답에 포함됩니다.
+
+---
+
 ## 주요 특징
 
 - **임베디드 MQTT 브로커**: Node.js 프로세스 내부에서 `aedes` TCP 브로커(1883) 기동 → 외부 브로커 설치 불필요
@@ -200,6 +245,7 @@ asthma-server/
 | `DEFAULT_USER_ID` | user_001 | Mock/기본 사용자 ID |
 | `DEFAULT_DEVICE_ID` | rpi_001 | Mock/기본 디바이스 ID |
 | `FITBIT_CLIENT_ID` / `FITBIT_CLIENT_SECRET` | (없음) | OAuth 자격증명 (실제 연동 시) |
+| `FITBIT_REDIRECT_URI` / `FITBIT_SCOPES` / `FITBIT_STATE_SECRET` | callback / 기본 scope / (없음) | Fitbit Lambda·로컬 OAuth 설정 |
 | `AIRKOREA_API_KEY` / `KMA_API_KEY` | (없음) | 공공데이터포털 API 키 |
 | `DISCORD_WEBHOOK_URL` | (없음) | 실제 Discord 채널 Webhook |
 
@@ -215,6 +261,7 @@ USE_MOCK_FITBIT=false
 FITBIT_CLIENT_ID=...
 FITBIT_CLIENT_SECRET=...
 FITBIT_REDIRECT_URI=http://localhost:3000/auth/fitbit/callback
+FITBIT_SCOPES="sleep heartrate oxygen_saturation respiratory_rate profile"
 ```
 1. `GET /auth/fitbit/login` → `authorizeUrl`로 이동하여 동의
 2. Fitbit이 `/auth/fitbit/callback?code=...`로 리다이렉트 → Access/Refresh 토큰이 Store에 저장됨

@@ -5,7 +5,6 @@ asthma-server/.aws-build/
 
 # Raspberry Pi device-local secrets
 pi-client/.env
-pi-client/certs/
 
 # Python local artifacts
 __pycache__/
