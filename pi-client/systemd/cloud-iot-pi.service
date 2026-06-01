@@ -1,0 +1,17 @@
+[Unit]
+Description=Cloud IoT Team 4 Raspberry Pi AWS IoT publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/cloud-iot-team-4/pi-client
+EnvironmentFile=/etc/cloud-iot-pi.env
+ExecStart=/home/pi/cloud-iot-team-4/pi-client/.venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

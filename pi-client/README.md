@@ -1,130 +1,297 @@
 # pi-client
 
-> 라즈베리파이에서 실물 센서를 읽어 서버로 MQTT publish 하는 클라이언트
+라즈베리파이에서 환경 센서 값을 읽어 **AWS IoT Core**로 publish 하는 클라이언트입니다.
+라즈베리파이에 서버를 띄우는 구조가 아니라, `systemd`로 Python publisher 데몬 1개만 계속 실행합니다.
 
-상위 프로젝트 개요: [../README.md](../README.md) · 서버: [../asthma-server/README.md](../asthma-server/README.md)
-
----
-
-## 이 폴더에서 만들 것
-
-라즈베리파이(4 또는 Zero 2 W 가정) 위에서 **센서 값을 주기적으로 읽어**, 서버의 MQTT 브로커로 아래 계약대로 publish 하는 **간단한 에이전트 한 개**.
-
-- **입력**: GPIO/I²C/UART로 연결된 환경 센서들
-- **출력**: MQTT publish `health/sensor/{deviceId}/environment` (JSON, 초/분 주기)
-- **실행**: 부팅 시 자동 기동 (systemd service)
-- **오프라인 내성**: 브로커 연결이 끊겨도 프로세스가 죽지 않고 재연결
+상위 프로젝트 개요: [../README.md](../README.md) · 서버/AWS Lambda: [../asthma-server/README.md](../asthma-server/README.md)
 
 ---
 
-## 하드웨어 (예상 BOM)
+## 현재 작성 상태
 
-| 센서 | 측정 항목 | 인터페이스 | 비고 |
-|---|---|---|---|
-| PMS7003 / SDS011 | PM2.5, PM10 | UART | 미세먼지 |
-| MH-Z19B | CO₂ | UART | 환기 판단의 핵심 |
-| SGP30 / CCS811 | VOC, (e)CO₂ | I²C | 선택 |
-| DHT22 / BME280 | 온도, 습도 | GPIO / I²C | BME280이면 기압도 함께 |
+현재 사용 가능 상태에 맞춰 DHT11만 실물 센서로 읽고, 사용할 수 없는 ZPH01/SGP30은 랜덤 대체값으로 publish합니다.
 
-> 실제 선정된 센서 + 배선도(핀 매핑) 는 이 섹션에 표/이미지로 채워 넣을 예정.
+```text
+pi-client/
+├── .env.example
+├── requirements.txt
+├── src/
+│   ├── config.py          # AWS IoT endpoint/cert/env/sensor 설정
+│   ├── main.py            # systemd/CLI 진입점
+│   ├── publisher.py       # AWS IoT MQTT mTLS 연결 + publish 루프
+│   └── sensors/
+│       ├── dht11.py       # DHT11: 온도/습도, GPIO4
+│       ├── environment.py       # Random ZPH01 + DHT11 + Random SGP30 값 병합
+│       ├── mock.py              # 노트북/demo용 전체 mock 센서
+│       ├── random_substitutes.py # ZPH01/SGP30 대체 랜덤 센서
+│       ├── sgp30.py             # SGP30 실제 driver 보관용
+│       └── zph01.py             # ZPH01 실제 driver 보관용
+├── systemd/
+│   └── cloud-iot-pi.service
+└── tests/
+    ├── test_client_contract.py
+    └── test_hardware_sensors.py
+```
 
----
-
-## 소프트웨어 계획
-
-- **언어**: Python 3.11+ (RPi 생태계 라이브러리 풍부)
-- **주요 의존성**:
-  - `paho-mqtt` — MQTT 클라이언트
-  - `pyserial` — PMS7003 / MH-Z19B UART
-  - `smbus2` 또는 `adafruit-circuitpython-*` — I²C 센서
-  - `python-dotenv` — 설정
-- **구조(예정)**:
-  ```
-  pi-client/
-  ├── README.md              # 본 파일
-  ├── pyproject.toml         # 의존성
-  ├── .env.example           # MQTT_URL, DEVICE_ID, SAMPLE_INTERVAL_SEC 등
-  ├── src/
-  │   ├── main.py            # 진입점 (루프 + MQTT 연결 관리)
-  │   ├── sensors/
-  │   │   ├── pms7003.py     # PM2.5/10 읽기
-  │   │   ├── mhz19b.py      # CO₂ 읽기
-  │   │   ├── sgp30.py       # VOC 읽기 (선택)
-  │   │   └── bme280.py      # 온/습도 읽기
-  │   ├── publisher.py       # payload 조립 + MQTT publish + 재연결
-  │   └── config.py          # env 로딩 / 기본값
-  └── systemd/
-      └── pi-client.service  # 부팅 시 자동 기동
-  ```
+실제 라즈베리파이에서는 `.env`의 `MOCK_SENSOR=false`로 실행합니다. 이때 DHT11은 실제 GPIO에서 읽고, ZPH01/SGP30 값은 적정 범위에서 랜덤 생성합니다. 노트북에서만 테스트할 때는 `MOCK_SENSOR=true`로 바꾸면 전체 값이 mock으로 생성됩니다.
 
 ---
 
-## MQTT publish 계약 (서버와 맞춰진 스키마)
+## 현재 센서 사용 방식
 
-- **토픽**: `health/sensor/{deviceId}/environment`
-- **QoS**: 0 (센서값 유실 허용, 고빈도)
-- **주기**: 기본 5초 (서버 Mock과 동일, `SAMPLE_INTERVAL_SEC`로 조정)
-- **페이로드(JSON)**:
+### 실제로 읽는 센서: DHT11
+
+| DHT11 핀 | Raspberry Pi 4 연결 | 설명 |
+|---|---|---|
+| DATA | GPIO4 / 물리 Pin 7 | 데이터 신호 |
+| VCC | 3.3V | 전원 공급 |
+| GND | GND | 접지 |
+
+DATA에는 10kΩ 풀업 저항을 3.3V에 연결합니다.
+
+```text
+3.3V ── 10kΩ ── DATA ── GPIO4
+```
+
+- 코드: `src/sensors/dht11.py`
+- publish 필드: `temperature`, `humidity`
+
+### 랜덤 대체값으로 처리하는 센서
+
+현재 ZPH01과 SGP30은 사용할 수 없는 상황이므로 실제 하드웨어 초기화/읽기를 하지 않습니다. 대신 `src/sensors/random_substitutes.py`가 아래 범위에서 값을 생성합니다.
+
+| 대체 대상 | publish 필드 | 랜덤 범위 |
+|---|---|---|
+| ZPH01 미세먼지 센서 | `pm25` | 5 ~ 65 µg/m³ |
+| ZPH01 미세먼지 센서 | `pm10` | `pm25 + 4` ~ `pm25 + 45` µg/m³ |
+| SGP30 공기질 센서 | `co2` | 450 ~ 1600 ppm |
+| SGP30 공기질 센서 | `voc` | 0.05 ~ 0.85 |
+
+보관용으로 `zph01.py`, `sgp30.py` 실제 driver 파일은 남겨두었지만, 현재 실행 경로에서는 사용하지 않습니다.
+
+---
+
+## 실행 구조
+
+1. 라즈베리파이 부팅
+2. `systemd`가 `cloud-iot-pi.service` 실행
+3. Python client가 X.509 인증서로 AWS IoT Core에 MQTT mTLS 연결
+4. DHT11 실제값 + ZPH01/SGP30 랜덤 대체값을 하나의 payload로 병합
+5. topic `health/sensor/{DEVICE_ID}/environment`로 publish
+6. AWS IoT Rule → Lambda → DynamoDB 흐름으로 저장
+
+토픽 계약:
+
+```text
+health/sensor/rpi_001/environment
+```
+
+payload 예시:
 
 ```json
 {
   "device_id": "rpi_001",
   "timestamp": "2026-04-22T05:18:06.176Z",
   "pm25": 47.47,
-  "pm10": 79.77,
-  "co2": 1380.72,
-  "voc": 0.59,
+  "co2": 512,
+  "voc": 0.023,
   "temperature": 22.06,
   "humidity": 46.28
 }
 ```
 
-필드 단위 (WHO/ASHRAE 기준): PM µg/m³ · CO₂ ppm · VOC 지수(0~1) · 온도 °C · 습도 %.
-값이 없는 센서 필드는 **키 자체를 생략**하거나 `null`로 보냄 (서버 Guide Service가 누락값 허용).
+현재 `pm10`은 ZPH01 대체 랜덤값으로 함께 보냅니다. 서버/Lambda는 필드 누락도 허용하지만, 시연 payload가 더 풍부하게 보이도록 포함합니다.
 
 ---
 
-## 환경변수 (`.env`, 예정)
+## AWS 쪽 Thing/인증서 준비
 
-| 키 | 기본값 | 설명 |
-|---|---|---|
-| `MQTT_URL` | `mqtt://<서버IP>:1883` | 브로커 주소 (서버와 같은 LAN) |
-| `DEVICE_ID` | `rpi_001` | 서버가 Store 키로 사용 |
-| `SAMPLE_INTERVAL_SEC` | `5` | publish 주기 |
-| `MQTT_CLIENT_ID` | `pi-client-{hostname}` | 브로커에서 식별용 |
-| `SENSOR_PMS7003_PORT` | `/dev/ttyAMA0` | UART 포트 |
-| `SENSOR_MHZ19B_PORT` | `/dev/ttyS0` | UART 포트 |
-| `I2C_BUS` | `1` | I²C 버스 번호 |
+개발 PC에서 AWS CLI 로그인 상태로 실행합니다. 이미 만든 AWS 리전은 `ap-northeast-2` 기준입니다.
+
+```bash
+cd pi-client
+
+REGION=ap-northeast-2
+THING_NAME=rpi_001
+POLICY_NAME=cloud-iot-team4-rpi-publisher
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+IOT_ENDPOINT=$(aws iot describe-endpoint \
+  --endpoint-type iot:Data-ATS \
+  --region "$REGION" \
+  --query endpointAddress \
+  --output text)
+
+mkdir -p certs
+curl -o certs/AmazonRootCA1.pem https://www.amazontrust.com/repository/AmazonRootCA1.pem
+aws iot create-thing --thing-name "$THING_NAME" --region "$REGION" || true
+
+CERT_ARN=$(aws iot create-keys-and-certificate \
+  --set-as-active \
+  --certificate-pem-outfile "certs/${THING_NAME}.pem.crt" \
+  --public-key-outfile "certs/${THING_NAME}.public.key" \
+  --private-key-outfile "certs/${THING_NAME}.private.pem.key" \
+  --region "$REGION" \
+  --query certificateArn \
+  --output text)
+
+cat > /tmp/cloud-iot-rpi-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["iot:Connect"],
+      "Resource": ["arn:aws:iot:${REGION}:${ACCOUNT_ID}:client/${THING_NAME}"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["iot:Publish"],
+      "Resource": ["arn:aws:iot:${REGION}:${ACCOUNT_ID}:topic/health/sensor/${THING_NAME}/environment"]
+    }
+  ]
+}
+EOF
+
+aws iot create-policy \
+  --policy-name "$POLICY_NAME" \
+  --policy-document file:///tmp/cloud-iot-rpi-policy.json \
+  --region "$REGION" || true
+
+aws iot attach-policy \
+  --policy-name "$POLICY_NAME" \
+  --target "$CERT_ARN" \
+  --region "$REGION"
+
+aws iot attach-thing-principal \
+  --thing-name "$THING_NAME" \
+  --principal "$CERT_ARN" \
+  --region "$REGION"
+
+cp .env.example .env
+sed -i.bak "s|^AWS_IOT_ENDPOINT=.*|AWS_IOT_ENDPOINT=${IOT_ENDPOINT}|" .env
+```
+
+`certs/`와 `.env`는 기기별 비밀 정보이므로 git에 올리지 않습니다.
 
 ---
 
-## 실행 흐름 (목표)
+## 라즈베리파이 설치
 
-1. 부팅 → `systemd`가 `pi-client.service` 기동
-2. `.env` 로드, 각 센서 초기화 (실패 시 `null`로 표시하고 계속)
-3. `paho-mqtt` 연결 → `MQTT_URL`
-4. **루프**: 센서 읽기 → payload 조립 → publish → `SAMPLE_INTERVAL_SEC` 대기
-5. 브로커 끊김 시 지수 백오프 재연결, 프로세스는 살아있음
-6. `Ctrl+C` / `SIGTERM` 수신 시 graceful shutdown
+라즈베리파이에 repo 또는 `pi-client/` 폴더를 복사한 뒤 실행합니다.
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip libgpiod2
+```
+
+GPIO 권한 추가 후 재부팅:
+
+```bash
+sudo usermod -aG gpio $USER
+sudo reboot
+```
+
+현재 ZPH01/SGP30은 랜덤 대체값을 쓰므로 UART/I2C 활성화는 필수가 아닙니다. DHT11만 GPIO4로 읽습니다.
+
+Python 환경:
+
+```bash
+cd ~/cloud-iot-team-4/pi-client
+python3 -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+`.env`와 `certs/`가 `pi-client/` 안에 있어야 합니다. 현재 구성에서 `.env` 핵심값은 아래입니다.
+
+```dotenv
+MOCK_SENSOR=false
+DHT11_PIN=D4
+DHT11_USE_PULSEIO=false
+```
+
+수동 실행:
+
+```bash
+cd ~/cloud-iot-team-4/pi-client
+. .venv/bin/activate
+python -m src.main
+```
 
 ---
 
-## 서버와의 통합 확인
+## 부팅 시 자동 실행(systemd)
 
-1. 서버 기동: `cd ../asthma-server && npm start` (단, `USE_MOCK_SENSOR=false`로 두어 Mock publisher 충돌 방지)
-2. pi-client 기동 후 서버 로그에 `[broker] pi-client-xxxxxx → health/sensor/rpi_001/environment (NN B)` 확인
-3. `curl http://<서버IP>:3000/api/data/environment/rpi_001 | jq` — 방금 publish한 값이 반환되면 OK
-4. `curl -X POST http://<서버IP>:3000/api/guide/trigger -H 'content-type: application/json' -d '{"scenario":"severe","sendToDiscord":false}' | jq` — 실제 RPi 값 기반으로 가이드가 생성되는지 확인
+서비스 파일의 경로는 기본적으로 `/home/pi/cloud-iot-team-4/pi-client`를 가정합니다. 다른 위치에 두면 `systemd/cloud-iot-pi.service`의 `WorkingDirectory`, `ExecStart`를 바꿉니다.
+
+```bash
+cd ~/cloud-iot-team-4/pi-client
+sudo cp .env /etc/cloud-iot-pi.env
+sudo cp systemd/cloud-iot-pi.service /etc/systemd/system/cloud-iot-pi.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now cloud-iot-pi.service
+sudo journalctl -u cloud-iot-pi.service -f
+```
+
+중지/재시작:
+
+```bash
+sudo systemctl stop cloud-iot-pi.service
+sudo systemctl restart cloud-iot-pi.service
+```
 
 ---
 
-## 작업 체크리스트
+## 코드 확장 위치
 
-- [ ] 센서 모델 확정 + 배선도 작성
-- [ ] `pyproject.toml` / `.env.example` 초안
-- [ ] 센서별 드라이버 모듈 (`sensors/*.py`) 각각 단위 테스트 가능하게
-- [ ] `publisher.py` — MQTT 재연결 + QoS + LWT(last will) 설정
-- [ ] `main.py` — 루프 + signal handling
-- [ ] `systemd/pi-client.service` 파일
-- [ ] 서버와 end-to-end 통합 테스트 (동일 LAN)
-- [ ] README의 하드웨어 표/배선도/트러블슈팅 섹션 채우기
+센서 드라이버는 구조상 `pi-client/src/sensors/` 아래에 둡니다.
+
+현재 매핑:
+
+```text
+src/sensors/
+├── random_substitutes.py # ZPH01/SGP30 랜덤 대체값
+├── dht11.py              # GPIO4 temperature/humidity
+├── environment.py        # 여러 센서 값 병합
+├── zph01.py              # 실제 ZPH01 driver 보관용
+├── sgp30.py              # 실제 SGP30 driver 보관용
+└── mock.py               # mock/demo
+```
+
+나중에 ZPH01/SGP30을 다시 쓸 수 있게 되면 `environment.py`에서 `RandomZPH01DustSensor`, `RandomSGP30AirQualitySensor` 대신 실제 driver로 바꾸면 됩니다. 새 센서를 추가하더라도 `read()`가 아래처럼 일부 field dict를 반환하면 병합할 수 있습니다.
+
+```python
+{"pm25": 12.3, "co2": 650, "voc": 0.2, "temperature": 23.1, "humidity": 45.0}
+```
+
+---
+
+## 로컬 검증
+
+개발 PC 또는 라즈베리파이에서:
+
+```bash
+python3 -m unittest discover -s pi-client/tests -v
+python3 -m py_compile $(find pi-client/src -name '*.py')
+```
+
+AWS까지 end-to-end 확인:
+
+```bash
+# Pi client 실행 후, 개발 PC에서 DynamoDB 최신 ENV item 확인
+aws dynamodb query \
+  --table-name AsthmaGuideData \
+  --key-condition-expression 'pk = :pk' \
+  --expression-attribute-values '{":pk":{"S":"DEVICE#rpi_001"}}' \
+  --scan-index-forward false \
+  --limit 1 \
+  --region ap-northeast-2
+```
+
+---
+
+## 참고 자료
+
+- Adafruit CircuitPython DHT: DHT11 uses a single data pin such as `board.D4`
+- ZPH01/SGP30은 현재 실물 미사용이며 `random_substitutes.py`에서 랜덤 대체값 생성
